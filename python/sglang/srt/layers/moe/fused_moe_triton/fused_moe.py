@@ -221,11 +221,15 @@ def fused_experts(
     block_shape: Optional[List[int]] = None,
 ):
     topk_weights, topk_ids, _ = topk_output
+    # check whether to filter the expert that not belongs to the current gpu
     filter_expert = (
         moe_runner_config.num_experts is None
         or moe_runner_config.num_experts != moe_runner_config.num_local_experts
     )
+
     if moe_runner_config.inplace:
+        # directly write back to the hidden state's memory, the same tensor
+        # makes no sense because no combine here requires num of tokens output for each topk
         assert not moe_runner_config.no_combine, "no combine + inplace makes no sense"
         inplace_fused_experts(
             hidden_states,
@@ -319,9 +323,10 @@ def _down_moe_use_tma():
 
 
 def fused_experts_impl(
+    # calculating the moe ffn
     hidden_states: torch.Tensor,
-    w1: torch.Tensor,
-    w2: torch.Tensor,
+    w1: torch.Tensor, #weight for up gate
+    w2: torch.Tensor, # weight for down gate
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
     b1: Optional[torch.Tensor] = None,
@@ -391,6 +396,7 @@ def fused_experts_impl(
     )
 
     config, (down_config, max_block_m) = get_config_func(M)
+    # calculating to support whether use the tma, to align the block
     down_moe_use_tma = (
         _down_moe_use_tma()
         and down_config is not None
@@ -406,6 +412,7 @@ def fused_experts_impl(
         device=hidden_states.device,
         dtype=hidden_states.dtype,
     )
+    # each token's topk result
     intermediate_cache3 = cache[: M * topk * w2.shape[1]].view(
         (M, topk, w2.shape[1]),
     )
@@ -454,9 +461,11 @@ def fused_experts_impl(
             else 0
         )
         total_tokens = tokens_in_chunk * topk + padded_tokens
+        # store the w1 gemm output, (gate + up)
         intermediate_cache1 = cache[: total_tokens * N].view(
             (total_tokens, N),
         )
+        # store the outcome of the activation result
         intermediate_cache2 = torch.empty(
             (total_tokens, N // 2),
             device=hidden_states.device,
@@ -469,6 +478,7 @@ def fused_experts_impl(
         sorted_token_ids, expert_ids, num_tokens_post_padded = moe_align_block_size(
             curr_topk_ids, config["BLOCK_SIZE_M"], E
         )
+        # calculate the w1, up gate 
 
         invoke_fused_moe_kernel(
             curr_hidden_states,
@@ -568,7 +578,7 @@ def fused_experts_impl(
             intermediate_cache2 = torch.square(F.relu(intermediate_cache1.view(-1, N)))
         else:
             raise ValueError(f"Unsupported activation: {activation=}, with {is_gated=}")
-
+        # calculate the w2, down
         invoke_fused_moe_kernel(
             intermediate_cache2,
             w2,
@@ -606,6 +616,7 @@ def fused_experts_impl(
 
         if no_combine:
             pass
+        # combine each topk back to each token
         elif _is_cuda:
             if topk_ids.shape[1] == 1 and routed_scaling_factor == 1.0:
                 pass  # we write directly into out_hidden_states
