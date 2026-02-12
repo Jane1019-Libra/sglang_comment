@@ -116,6 +116,7 @@ def get_moe_configs(
 
     # If no optimized configuration is available, we will use the default configuration when down_moe is False
     # When down_moe is True, we will try to use the config for down_moe=False
+    # down_moe: the stage for gemm operation that transfer the token from intermediate state back to the hidden state, part of moe operations
     if down_moe:
         logger.warning(
             (
@@ -134,6 +135,10 @@ def get_moe_configs(
         )
     return None
 
+# M: the token number that schedule to this expert, handled by the current kernel
+# E: the number of experts
+# K: the hidden size
+# N: the intermediate size
 
 def get_default_config(
     M: int,
@@ -235,7 +240,8 @@ def try_get_optimal_moe_config(
 
         if configs:
             # If an optimal configuration map has been found, look up the
-            # optimal config
+            # optimal config, using M as a criteria
+            
             config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
         else:
             # Else use the default config
