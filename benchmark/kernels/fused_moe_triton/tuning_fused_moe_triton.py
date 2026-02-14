@@ -1,4 +1,12 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/main/benchmarks/kernels/benchmark_moe.py
+# difference:
+'''
+Docstring for benchmark.kernels.fused_moe_triton.tuning_fused_moe_triton
+doesnt support int4 doesn't support DeepGemm
+didn't clean the triton jit load and memory
+
+with l2 cache flush and per-channel quantization
+'''
 import argparse
 import time
 from contextlib import nullcontext
@@ -32,7 +40,10 @@ from sglang.srt.utils import is_hip
 
 _is_hip = is_hip()
 
-
+'''
+for one moe forward latency, calculate the kernel execution time
+except the python overhead, jit, launch overhead
+'''
 def benchmark_config(
     config: BenchmarkConfig,
     num_tokens: int,
@@ -84,6 +95,7 @@ def benchmark_config(
     w2_scale = None
     a1_scale = None
     a2_scale = None
+
     if use_int8_w8a16:
         w1_scale = torch.randn(
             (num_experts, 2 * shard_intermediate_size), dtype=torch.float32
@@ -123,6 +135,9 @@ def benchmark_config(
         renormalize=True,
     )
     topk_output = select_experts(x, input_gating, topk_config)
+    '''
+    return: topk_weights, topk_ids, router_logits
+    '''
 
     def prepare(i: int):
         input_gating = gating_output[i]
@@ -169,10 +184,12 @@ def benchmark_config(
     for _ in range(5):
         graph.replay()
     torch.cuda.synchronize()
+    # let cache, pipeline be stable, replay more smooth
 
     # Flush L2 cache with 256 MB data
     cache_flush = torch.empty(int(256e6 // 4), dtype=torch.int, device="cuda")
     cache_flush.zero_()
+    # 降低虚高
 
     start_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_iters)]
     end_events = [torch.cuda.Event(enable_timing=True) for _ in range(num_iters)]
@@ -193,6 +210,7 @@ def benchmark_config(
 
 
 @ray.remote(num_gpus=1)
+# each instance use 1 gpu
 class BenchmarkWorker:
 
     def __init__(self, seed: int) -> None:
